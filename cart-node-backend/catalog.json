@@ -1,0 +1,46 @@
+{
+    "items": [
+        {
+            "sku": "ELEC-001",
+            "name": "Wireless Noise-Canceling Headphones",
+            "description": "High-quality over-ear headphones with active noise cancellation and 30-hour battery life.",
+            "price": 299.99,
+            "stock": 45
+        },
+        {
+            "sku": "ELEC-002",
+            "name": "Smart Home Hub 4K",
+            "description": "Voice-controlled smart home center with a 10-inch 4K display.",
+            "price": 149.50,
+            "stock": 12
+        },
+        {
+            "sku": "APP-101",
+            "name": "Organic Cotton T-Shirt",
+            "description": "A comfortable, ethically sourced 100% organic cotton t-shirt. Available in black and white.",
+            "price": 24.00,
+            "stock": 120
+        },
+        {
+            "sku": "APP-102",
+            "name": "Waterproof Hiking Jacket",
+            "description": "Lightweight, breathable, and fully waterproof jacket suitable for extreme weather.",
+            "price": 189.95,
+            "stock": 8
+        },
+        {
+            "sku": "HOME-050",
+            "name": "Ceramic Pour-Over Coffee Maker",
+            "description": "Artisan-crafted ceramic coffee dripper for the perfect morning brew.",
+            "price": 45.00,
+            "stock": 0
+        },
+        {
+            "sku": "GROC-300",
+            "name": "Organic Fair-Trade Coffee Beans",
+            "description": "1 lb bag of medium roast arabica beans sourced from Colombia.",
+            "price": 18.99,
+            "stock": 250
+        }
+    ]
+}

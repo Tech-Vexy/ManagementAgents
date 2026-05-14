@@ -7,8 +7,26 @@ import json
 import asyncio
 from google import genai
 from google.genai import types
+from google import adk
+from google.adk.sessions import InMemorySessionService
+from google.adk.agents.live_request_queue import LiveRequestQueue, LiveRequest
+from google.adk.tools import FunctionTool
+from tools import query_catalog, check_stock, reserve_item
 
 app = FastAPI(title="Cart-Node Backend", description="Backend for Cart-Node e-commerce platform")
+
+# Initialize ADK components
+session_service = InMemorySessionService()
+supervisor_agent = adk.Agent(
+    name="supervisor",
+    model="gemini-2.0-flash",
+    instruction="You are the Supervisor Agent for Cart-Node, an e-commerce platform. You help the user find items, check stock, and reserve items for their order. Always use the provided tools to lookup exact prices and SKUs. Never estimate or hallucinate prices.",
+    tools=[
+        FunctionTool(func=query_catalog),
+        FunctionTool(func=check_stock),
+        FunctionTool(func=reserve_item)
+    ]
+)
 
 class LoginRequest(BaseModel):
     username: str
@@ -43,7 +61,6 @@ def verify_ws_token(token: str) -> dict:
 
 @app.post("/login", response_model=LoginResponse)
 async def login(request: LoginRequest):
-    # In a real app, verify against DB
     if request.username == "testuser" and request.password == "password":
         token = create_token({"sub": request.username, "role": "user"})
         return LoginResponse(token=token)
@@ -67,7 +84,8 @@ async def live_audio_endpoint(websocket: WebSocket):
         if not token:
             await websocket.close(code=1008, reason="Missing token")
             return
-        verify_ws_token(token)
+        user_info = verify_ws_token(token)
+        user_id = user_info.get("sub", "anonymous")
     except Exception as e:
         await websocket.close(code=1008, reason=f"Auth failed: {str(e)}")
         return
@@ -78,87 +96,93 @@ async def live_audio_endpoint(websocket: WebSocket):
         await websocket.close(code=1011)
         return
 
-    # 2. Connect to Gemini Live API
+    # Generate a unique session per connection for now
+    session_id = f"session_{id(websocket)}"
+
+    runner = adk.Runner(
+        app_name="cart-node",
+        agent=supervisor_agent,
+        session_service=session_service,
+    )
+
+    queue = LiveRequestQueue()
+
     try:
-        client = genai.Client(api_key=gemini_api_key)
+        # Task 1: Read from WebSocket (client audio & text) and send to Queue
+        async def receive_from_client():
+            try:
+                while True:
+                    message = await websocket.receive()
+                    if "text" in message:
+                        try:
+                            data = json.loads(message["text"])
+                            if data.get("type") == "end_of_turn":
+                                # Send turn complete signal
+                                queue.send(LiveRequest(content=types.LiveClientContent(turn_complete=True)))
+                            elif data.get("type") == "close":
+                                queue.close()
+                                return
+                        except Exception:
+                            pass
+                    elif "bytes" in message:
+                        data = message["bytes"]
+                        # Send PCM audio to Gemini
+                        blob = types.Blob(data=data, mime_type="audio/pcm;rate=16000")
+                        queue.send_realtime(blob)
+            except WebSocketDisconnect:
+                print("Client disconnected")
+                queue.close()
+            except Exception as e:
+                print(f"Error receiving from client: {e}")
+                queue.close()
 
-        # Configure Gemini
-        config = types.LiveConnectConfig(
-            system_instruction=types.Content(parts=[types.Part.from_text(text="You are the Supervisor Agent for Cart-Node, an e-commerce platform. You help the user place orders. Please be brief and helpful.")]),
-        )
+        # Task 2: Read from ADK runner and send to WebSocket
+        async def receive_from_adk():
+            try:
+                async for event in runner.run_live(
+                    user_id=user_id,
+                    session_id=session_id,
+                    live_request_queue=queue
+                ):
+                    if event.content and event.content.parts:
+                        for part in event.content.parts:
+                            if part.text:
+                                await websocket.send_text(json.dumps({"type": "text", "data": part.text}))
+                            if part.inline_data:
+                                await websocket.send_bytes(part.inline_data.data)
+                                await websocket.send_text(json.dumps({"type": "audio_metadata", "mime_type": part.inline_data.mime_type}))
 
-        # We use a context manager for the Live API
-        async with client.aio.live.connect(model="gemini-2.0-flash", config=config) as session:
+                    if event.turn_complete:
+                        await websocket.send_text(json.dumps({"type": "turn_complete"}))
 
-            # Task 1: Read from WebSocket (client audio & text) and send to Gemini
-            async def receive_from_client():
+                    if event.error_message:
+                        await websocket.send_text(json.dumps({"error": event.error_message}))
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                print(f"Error receiving from ADK: {e}")
                 try:
-                    while True:
-                        message = await websocket.receive()
-                        if "text" in message:
-                            try:
-                                data = json.loads(message["text"])
-                                if data.get("type") == "end_of_turn":
-                                    await session.send(end_of_turn=True)
-                                elif data.get("type") == "close":
-                                    # Client specifically requests closure
-                                    return
-                            except Exception:
-                                pass
-                        elif "bytes" in message:
-                            data = message["bytes"]
-                            # Send PCM audio to Gemini WITHOUT end_of_turn=True
-                            await session.send(input={"data": data, "mime_type": "audio/pcm;rate=16000"}, end_of_turn=False)
-                except WebSocketDisconnect:
-                    print("Client disconnected")
-                except Exception as e:
-                    print(f"Error receiving from client: {e}")
-
-            # Task 2: Read from Gemini and send to WebSocket (text/audio back to client)
-            async def receive_from_gemini():
-                try:
-                    async for response in session.receive():
-                        server_content = response.server_content
-                        if server_content is not None:
-                            model_turn = server_content.model_turn
-                            if model_turn is not None:
-                                for part in model_turn.parts:
-                                    if part.text:
-                                        # Stream text back to the client
-                                        await websocket.send_text(json.dumps({"type": "text", "data": part.text}))
-                                    if part.inline_data:
-                                        # Stream audio bytes back to the client if the model returns audio
-                                        await websocket.send_bytes(part.inline_data.data)
-                                        # Also send a signal that audio chunk arrived
-                                        await websocket.send_text(json.dumps({"type": "audio_metadata", "mime_type": part.inline_data.mime_type}))
-
-                            if server_content.turn_complete:
-                                await websocket.send_text(json.dumps({"type": "turn_complete"}))
-                except asyncio.CancelledError:
+                    await websocket.send_text(json.dumps({"error": str(e)}))
+                except:
                     pass
-                except Exception as e:
-                    print(f"Error receiving from Gemini: {e}")
-                    try:
-                        await websocket.send_text(json.dumps({"error": str(e)}))
-                    except:
-                        pass
 
-            # Run both tasks concurrently
-            t1 = asyncio.create_task(receive_from_client())
-            t2 = asyncio.create_task(receive_from_gemini())
+        # Run both tasks concurrently
+        t1 = asyncio.create_task(receive_from_client())
+        t2 = asyncio.create_task(receive_from_adk())
 
-            # Wait for either the client to close (or error), or gemini stream to error
-            done, pending = await asyncio.wait(
-                [t1, t2],
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in pending:
-                task.cancel()
+        # Wait for either the client to close (or error), or gemini stream to error
+        done, pending = await asyncio.wait(
+            [t1, t2],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
 
     except Exception as e:
         print(f"WebSocket session error: {e}")
     finally:
         try:
+            await runner.close()
             await websocket.close()
         except:
             pass

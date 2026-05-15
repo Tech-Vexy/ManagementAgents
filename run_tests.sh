@@ -3,7 +3,7 @@ set -e
 
 echo "Running Backend Tests..."
 cd cart-node-backend
-uv run pytest test_auth.py test_main.py test_tools.py
+uv run pytest
 cd ..
 
 echo "Running Android Tests..."

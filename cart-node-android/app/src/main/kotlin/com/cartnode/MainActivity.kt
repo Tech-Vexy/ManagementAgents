@@ -174,6 +174,10 @@ fun ChatScreen() {
     var isProcessing by remember { mutableStateOf(false) }
     var showAddressInput by remember { mutableStateOf(false) }
     var showMap by remember { mutableStateOf(false) }
+    var showBill by remember { mutableStateOf(false) }
+    var billAmount by remember { mutableStateOf(0.0) }
+    var billItems by remember { mutableStateOf(listOf<String>()) }
+    var shippingFee by remember { mutableStateOf(0.0) }
     val coroutineScope = rememberCoroutineScope()
 
     // To handle microphone recording state safely
@@ -235,6 +239,46 @@ fun ChatScreen() {
             }
         }
 
+        if (showBill) {
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Itemized Receipt", style = MaterialTheme.typography.titleMedium)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    billItems.forEach { item ->
+                        Text("- $item", style = MaterialTheme.typography.bodyMedium)
+                    }
+                    Text("- Shipping: $$shippingFee", style = MaterialTheme.typography.bodyMedium)
+                    Divider(modifier = Modifier.padding(vertical = 8.dp))
+                    Text("Total Bill: $$billAmount", style = MaterialTheme.typography.titleLarge)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Button(
+                        onClick = {
+                            messages = messages + "You: Confirmed payment of $$billAmount"
+                            showBill = false
+
+                            // Send confirmation out of band so the backend knows
+                            coroutineScope.launch(Dispatchers.IO) {
+                                try {
+                                    NetworkClient.client.post("http://10.0.2.2:8000/confirm_bill") {
+                                        contentType(ContentType.Application.Json)
+                                    }
+                                } catch (e: Exception) {
+                                    withContext(Dispatchers.Main) {
+                                        messages = messages + "Error sending confirmation: ${e.message}"
+                                    }
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Confirm & Pay")
+                    }
+                }
+            }
+        }
+
         LazyColumn(
             modifier = Modifier.weight(1f).fillMaxWidth(),
             reverseLayout = true
@@ -277,6 +321,26 @@ fun ChatScreen() {
                                                 showAddressInput = true
                                             } else if (signal == "trigger_maps_ui") {
                                                 showMap = true
+                                            } else if (signal.startsWith("present_bill:")) {
+                                                try {
+                                                    val jsonStr = signal.removePrefix("present_bill:")
+                                                    val payload = Json.decodeFromString<JsonObject>(jsonStr)
+                                                    billAmount = payload["amount"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull() ?: 0.0
+                                                    shippingFee = payload["shipping_fee"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull() ?: 0.0
+
+                                                    val itemsArray = payload["items"] as? kotlinx.serialization.json.JsonArray
+                                                    billItems = itemsArray?.map { itemObj ->
+                                                        val obj = itemObj as? JsonObject
+                                                        val name = obj?.get("name")?.jsonPrimitive?.contentOrNull ?: "Item"
+                                                        val price = obj?.get("price")?.jsonPrimitive?.contentOrNull ?: "0.0"
+                                                        "$name : $$price"
+                                                    } ?: listOf()
+
+                                                    showBill = true
+                                                } catch(e: Exception) {
+                                                    // Fallback if parsing fails
+                                                    showBill = true
+                                                }
                                             }
                                         }
                                     )
@@ -376,6 +440,11 @@ private suspend fun handleLiveVoiceOrder(
                                         } else if (data.contains("trigger_maps_ui")) {
                                             withContext(Dispatchers.Main) {
                                                 onUiSignal("trigger_maps_ui")
+                                            }
+                                        } else if (data.contains("present_bill")) {
+                                            withContext(Dispatchers.Main) {
+                                                // Extract the full JSON payload containing present_bill
+                                                onUiSignal("present_bill:$data")
                                             }
                                         } else {
                                             withContext(Dispatchers.Main) {

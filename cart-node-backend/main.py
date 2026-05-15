@@ -96,8 +96,9 @@ async def live_audio_endpoint(websocket: WebSocket):
         await websocket.close(code=1011)
         return
 
-    # Generate a unique session per connection for now
-    session_id = f"session_{id(websocket)}"
+    # Use the authenticated user's ID to maintain a consistent session
+    # across multiple WebSocket connections
+    session_id = f"session_for_{user_id}"
 
     runner = adk.Runner(
         app_name="cart-node",

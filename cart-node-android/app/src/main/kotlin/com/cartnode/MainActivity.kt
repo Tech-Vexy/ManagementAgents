@@ -1,6 +1,7 @@
 package com.cartnode
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
@@ -21,6 +22,16 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.google.android.gms.maps.model.CameraPosition
+import com.google.android.gms.maps.model.LatLng
+import com.google.android.libraries.places.api.Places
+import com.google.android.libraries.places.api.model.Place
+import com.google.android.libraries.places.widget.Autocomplete
+import com.google.android.libraries.places.widget.model.AutocompleteActivityMode
+import com.google.maps.android.compose.GoogleMap
+import com.google.maps.android.compose.Marker
+import com.google.maps.android.compose.MarkerState
+import com.google.maps.android.compose.rememberCameraPositionState
 import io.ktor.client.plugins.websocket.*
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -59,6 +70,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Initialize Places SDK using the meta-data key if available, or a fallback.
+        val applicationInfo = packageManager.getApplicationInfo(packageName, PackageManager.GET_META_DATA)
+        val apiKey = applicationInfo.metaData?.getString("com.google.android.geo.API_KEY") ?: ""
+        if (!Places.isInitialized()) {
+            Places.initialize(applicationContext, apiKey)
+        }
 
         hasAudioPermission = ContextCompat.checkSelfPermission(
             this, Manifest.permission.RECORD_AUDIO
@@ -154,12 +172,69 @@ fun ChatScreen() {
     var messages by remember { mutableStateOf(listOf<String>()) }
     var isRecording by remember { mutableStateOf(false) }
     var isProcessing by remember { mutableStateOf(false) }
+    var showAddressInput by remember { mutableStateOf(false) }
+    var showMap by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
     // To handle microphone recording state safely
     val isRecordingState = remember { AtomicBoolean(false) }
 
+    // Mock user location / destination for demo
+    val destination = LatLng(40.7128, -74.0060)
+    val cameraPositionState = rememberCameraPositionState {
+        position = CameraPosition.fromLatLngZoom(destination, 15f)
+    }
+
+    // Places Autocomplete Launcher
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val intentLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            result.data?.let { intent ->
+                val place = Autocomplete.getPlaceFromIntent(intent)
+                messages = messages + "You: Selected address ${place.address}"
+                showAddressInput = false
+                // Normally this would be streamed back to the agent via WebSocket
+            }
+        }
+    }
+
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        if (showMap) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(200.dp)
+                    .padding(bottom = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                GoogleMap(
+                    modifier = Modifier.fillMaxSize(),
+                    cameraPositionState = cameraPositionState
+                ) {
+                    Marker(
+                        state = MarkerState(position = destination),
+                        title = "Delivery Destination"
+                    )
+                }
+            }
+        }
+
+        if (showAddressInput) {
+            Button(
+                onClick = {
+                    val fields = listOf(Place.Field.ID, Place.Field.NAME, Place.Field.ADDRESS)
+                    val intent = Autocomplete.IntentBuilder(AutocompleteActivityMode.OVERLAY, fields)
+                        .build(context)
+                    intentLauncher.launch(intent)
+                },
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+            ) {
+                Text("Search Address")
+            }
+        }
+
         LazyColumn(
             modifier = Modifier.weight(1f).fillMaxWidth(),
             reverseLayout = true
@@ -196,6 +271,13 @@ fun ChatScreen() {
                                         },
                                         onProcessingStateChanged = { state ->
                                             isProcessing = state
+                                        },
+                                        onUiSignal = { signal ->
+                                            if (signal == "request_address") {
+                                                showAddressInput = true
+                                            } else if (signal == "trigger_maps_ui") {
+                                                showMap = true
+                                            }
                                         }
                                     )
                                 }
@@ -220,7 +302,8 @@ fun ChatScreen() {
 private suspend fun handleLiveVoiceOrder(
     isRecordingState: AtomicBoolean,
     onMessageReceived: (String) -> Unit,
-    onProcessingStateChanged: (Boolean) -> Unit
+    onProcessingStateChanged: (Boolean) -> Unit,
+    onUiSignal: (String) -> Unit
 ) {
     try {
         NetworkClient.client.webSocket("ws://10.0.2.2:8000/live/audio") {
@@ -286,8 +369,18 @@ private suspend fun handleLiveVoiceOrder(
                                     val json = Json.decodeFromString<JsonObject>(text)
                                     if (json["type"]?.jsonPrimitive?.contentOrNull == "text") {
                                         val data = json["data"]?.jsonPrimitive?.contentOrNull ?: ""
-                                        withContext(Dispatchers.Main) {
-                                            onMessageReceived("Gemini: $data")
+                                        if (data.contains("request_address")) {
+                                            withContext(Dispatchers.Main) {
+                                                onUiSignal("request_address")
+                                            }
+                                        } else if (data.contains("trigger_maps_ui")) {
+                                            withContext(Dispatchers.Main) {
+                                                onUiSignal("trigger_maps_ui")
+                                            }
+                                        } else {
+                                            withContext(Dispatchers.Main) {
+                                                onMessageReceived("Gemini: $data")
+                                            }
                                         }
                                     } else if (json["type"]?.jsonPrimitive?.contentOrNull == "turn_complete") {
                                         withContext(Dispatchers.Main) {

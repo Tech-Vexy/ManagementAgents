@@ -1,0 +1,39 @@
+# Default Lobstertrap Security Policy
+# This defines the rules for the standalone Lobstertrap proxy interceptor.
+
+name: cart-node-security-policy
+version: 1.0
+
+# 1. Mathematical Validation Guardrails
+# Ensures that tools emitting payment/checkout logic verify against expected totals.
+mathematical_validation:
+  enabled: true
+  rules:
+    - name: verify_checkout_total
+      target_tool: execute_payment_gateway
+      # The proxy calculates this based on active session context
+      expected_formula: SUM(cart_total) + shipping_fee
+      error_message: "Hallucinated price detected. Requested amount does not match calculated total."
+
+# 2. State & UI Confirmation Guardrails
+# Ensures that critical transactions aren't bypassed by autonomous loops.
+state_verification:
+  enabled: true
+  rules:
+    - name: require_user_confirmation
+      target_tool: execute_payment_gateway
+      required_state_flag: ui_bill_confirmed
+      error_message: "Missing explicit UI confirmation from user. Awaiting present_bill response."
+
+# 3. Prompt Injection / Override Defenses
+# Pattern matching on the incoming network stream before it hits the LLM.
+input_sanitization:
+  enabled: true
+  blocked_patterns:
+    - "ignore previous"
+    - "override price"
+    - "override total"
+    - "system prompt"
+    - "bypass proxy"
+  action: drop
+  error_message: "Unauthorized command sequence detected."

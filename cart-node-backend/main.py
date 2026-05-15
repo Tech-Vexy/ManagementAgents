@@ -11,8 +11,9 @@ from google import adk
 from google.adk.sessions import InMemorySessionService
 from google.adk.agents.live_request_queue import LiveRequestQueue, LiveRequest
 from google.adk.tools import FunctionTool
-from tools import query_catalog, check_stock, reserve_item, validate_address, calculate_eta_and_fee, execute_payment_gateway
+from tools import query_catalog, check_stock, reserve_item, validate_address, calculate_eta_and_fee, execute_payment_gateway, track_package
 from lobstertrap import get_lobstertrap
+import contextvars
 
 app = FastAPI(title="Cart-Node Backend", description="Backend for Cart-Node e-commerce platform")
 
@@ -20,52 +21,58 @@ app = FastAPI(title="Cart-Node Backend", description="Backend for Cart-Node e-co
 session_service = InMemorySessionService()
 lobstertrap = get_lobstertrap(session_service)
 
-# We need to expose a wrapped tool that knows the current user.
-# A proper architecture might use Dependency Injection or context vars,
-# but for this specific scope we can use a small context container class.
-class CheckoutContext:
-    user_id = None
-    session_id = None
-
-checkout_context = CheckoutContext()
+# Use contextvars for safe concurrent session state resolution
+current_user_id = contextvars.ContextVar("current_user_id", default=None)
+current_session_id = contextvars.ContextVar("current_session_id", default=None)
 
 def secure_execute_payment_gateway(amount: float) -> str:
-    if not checkout_context.user_id or not checkout_context.session_id:
+    user_id = current_user_id.get()
+    session_id = current_session_id.get()
+
+    if not user_id or not session_id:
          return json.dumps({"error": "No active context for checkout"})
 
     session = session_service.get_session_sync(
         app_name="cart-node",
-        user_id=checkout_context.user_id,
-        session_id=checkout_context.session_id
+        user_id=user_id,
+        session_id=session_id
     )
     active_state = session.state if session else None
 
     # Pass execution to the Lobstertrap
     return lobstertrap.intercept_checkout(
-        user_id=checkout_context.user_id,
-        session_id=checkout_context.session_id,
+        user_id=user_id,
+        session_id=session_id,
         tool_args={"amount": amount},
         active_state=active_state
     )
 
 def secure_reserve_item(sku: str, quantity: int) -> str:
-    session = session_service.get_session_sync(
-        app_name="cart-node",
-        user_id=checkout_context.user_id,
-        session_id=checkout_context.session_id
-    )
-    if session:
-        return reserve_item(sku, quantity, active_state=session.state)
+    user_id = current_user_id.get()
+    session_id = current_session_id.get()
+
+    if user_id and session_id:
+        session = session_service.get_session_sync(
+            app_name="cart-node",
+            user_id=user_id,
+            session_id=session_id
+        )
+        if session:
+            return reserve_item(sku, quantity, active_state=session.state)
     return reserve_item(sku, quantity)
 
 def secure_calculate_eta_and_fee(lat: float, lng: float) -> str:
-    session = session_service.get_session_sync(
-        app_name="cart-node",
-        user_id=checkout_context.user_id,
-        session_id=checkout_context.session_id
-    )
-    if session:
-        return calculate_eta_and_fee(lat, lng, active_state=session.state)
+    user_id = current_user_id.get()
+    session_id = current_session_id.get()
+
+    if user_id and session_id:
+        session = session_service.get_session_sync(
+            app_name="cart-node",
+            user_id=user_id,
+            session_id=session_id
+        )
+        if session:
+            return calculate_eta_and_fee(lat, lng, active_state=session.state)
     return calculate_eta_and_fee(lat, lng)
 
 checkout_agent = adk.Agent(
@@ -78,17 +85,18 @@ checkout_agent = adk.Agent(
 shipping_agent = adk.Agent(
     name="shipping",
     model="gemini-2.0-flash",
-    instruction="You are the Shipping Agent. Your job is to validate addresses and calculate delivery ETAs and fees.",
+    instruction="You are the Shipping Agent. Your job is to validate addresses, calculate delivery ETAs and fees, and track active packages.",
     tools=[
         FunctionTool(func=validate_address),
-        FunctionTool(func=secure_calculate_eta_and_fee)
+        FunctionTool(func=secure_calculate_eta_and_fee),
+        FunctionTool(func=track_package)
     ]
 )
 
 supervisor_agent = adk.Agent(
     name="supervisor",
     model="gemini-2.0-flash",
-    instruction="You are the Supervisor Agent for Cart-Node, an e-commerce platform. You help the user find items, check stock, and reserve items for their order. Route logistics tasks to the shipping agent. Route payment tasks to the checkout agent. Always use the provided tools to lookup exact prices and SKUs. Never estimate or hallucinate prices.",
+    instruction="You are the Supervisor Agent for Cart-Node, an e-commerce platform. You help the user find items, check stock, reserve items for their order, and track existing packages. Route logistics and tracking tasks to the shipping agent. Route payment tasks to the checkout agent. Always use the provided tools to lookup exact prices and SKUs. Never estimate or hallucinate prices.",
     tools=[
         FunctionTool(func=query_catalog),
         FunctionTool(func=check_stock),
@@ -190,8 +198,8 @@ async def live_audio_endpoint(websocket: WebSocket):
     session_id = f"session_for_{user_id}"
 
     # Update context for the checkout agent tool
-    checkout_context.user_id = user_id
-    checkout_context.session_id = session_id
+    current_user_id.set(user_id)
+    current_session_id.set(session_id)
 
     runner = adk.Runner(
         app_name="cart-node",

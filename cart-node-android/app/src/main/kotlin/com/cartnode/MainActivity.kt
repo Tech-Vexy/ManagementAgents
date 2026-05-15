@@ -178,6 +178,8 @@ fun ChatScreen() {
     var billAmount by remember { mutableStateOf(0.0) }
     var billItems by remember { mutableStateOf(listOf<String>()) }
     var shippingFee by remember { mutableStateOf(0.0) }
+    var trackingStatus by remember { mutableStateOf<String?>(null) }
+    var trackingEta by remember { mutableStateOf<String?>(null) }
     val coroutineScope = rememberCoroutineScope()
 
     // To handle microphone recording state safely
@@ -236,6 +238,22 @@ fun ChatScreen() {
                 modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
             ) {
                 Text("Search Address")
+            }
+        }
+
+        if (trackingStatus != null) {
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Package Tracking", style = MaterialTheme.typography.titleMedium)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text("Status: $trackingStatus", style = MaterialTheme.typography.bodyMedium)
+                    trackingEta?.let {
+                        Text("ETA: $it", style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
             }
         }
 
@@ -341,6 +359,15 @@ fun ChatScreen() {
                                                     // Fallback if parsing fails
                                                     showBill = true
                                                 }
+                                            } else if (signal.startsWith("track_package:")) {
+                                                try {
+                                                    val jsonStr = signal.removePrefix("track_package:")
+                                                    val payload = Json.decodeFromString<JsonObject>(jsonStr)
+                                                    trackingStatus = payload["status"]?.jsonPrimitive?.contentOrNull
+                                                    trackingEta = payload["eta"]?.jsonPrimitive?.contentOrNull
+                                                } catch(e: Exception) {
+                                                    // Ignore
+                                                }
                                             }
                                         }
                                     )
@@ -445,6 +472,10 @@ private suspend fun handleLiveVoiceOrder(
                                             withContext(Dispatchers.Main) {
                                                 // Extract the full JSON payload containing present_bill
                                                 onUiSignal("present_bill:$data")
+                                            }
+                                        } else if (data.contains("track_package")) {
+                                            withContext(Dispatchers.Main) {
+                                                onUiSignal("track_package:$data")
                                             }
                                         } else {
                                             withContext(Dispatchers.Main) {

@@ -53,6 +53,24 @@ def check_stock(sku: str) -> str:
 
     return json.dumps({"error": f"SKU {sku} not found"})
 
+def track_package(order_id: str) -> str:
+    """Tracks the shipping status of an order.
+
+    Args:
+        order_id: The ID of the order to track.
+
+    Returns:
+        A JSON string containing the package status, coordinates, and emitting a UI signal.
+    """
+    # Mocking package tracking response
+    return json.dumps({
+        "order_id": order_id,
+        "status": "Out for Delivery",
+        "eta": "2:30 PM",
+        "current_coordinates": {"lat": 40.7128, "lng": -74.0060},
+        "signal": "track_package"
+    })
+
 
 def validate_address(address: str) -> str:
     """Validates the user's shipping address.

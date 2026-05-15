@@ -1,4 +1,4 @@
-from tools import query_catalog, check_stock, reserve_item
+from tools import query_catalog, check_stock, reserve_item, track_package
 import json
 
 def test_query_catalog():
@@ -52,3 +52,11 @@ def test_reserve_item_invalid():
     result_str = reserve_item("INVALID-SKU", 1)
     result = json.loads(result_str)
     assert "error" in result
+
+def test_track_package():
+    result_str = track_package("ORDER_123")
+    result = json.loads(result_str)
+    assert result["order_id"] == "ORDER_123"
+    assert result["status"] == "Out for Delivery"
+    assert "eta" in result
+    assert result["signal"] == "track_package"

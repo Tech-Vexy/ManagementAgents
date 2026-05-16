@@ -6,9 +6,9 @@ cd cart-node-backend
 uv run pytest
 cd ..
 
-echo "Running Android Tests..."
-cd cart-node-android
-./gradlew test
+echo "Running Flutter Tests..."
+cd cart_node_flutter
+flutter test
 cd ..
 
 echo "All tests passed successfully!"
